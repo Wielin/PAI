@@ -36,11 +36,39 @@
 </div>
 
 <style>
+	@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@500&display=swap');
+
+	:global(:root) {
+		--ink-900: #111827;
+		--ink-700: #334155;
+		--ink-500: #64748b;
+		--brand-700: #c2410c;
+		--brand-500: #f97316;
+		--accent-500: #14b8a6;
+		--surface: #ffffff;
+		--surface-alt: #fff7ed;
+		--line: #e2e8f0;
+		--shadow: 0 14px 30px rgba(15, 23, 42, 0.12);
+		--font-body: 'Space Grotesk', 'Segoe UI', sans-serif;
+		--font-mono: 'JetBrains Mono', 'Consolas', monospace;
+	}
+
 	:global(body) {
 		margin: 0;
-		font-family: 'Segoe UI', system-ui, sans-serif;
-		background: #f6f7fb;
-		color: #1c1f2a;
+		font-family: var(--font-body);
+		background: linear-gradient(135deg, #fef3c7 0%, #e0f2fe 45%, #dcfce7 100%);
+		color: var(--ink-900);
+	}
+
+	:global(body)::before {
+		content: '';
+		position: fixed;
+		inset: 0;
+		background: radial-gradient(circle at 20% 20%, rgba(255, 255, 255, 0.75), transparent 55%),
+			radial-gradient(circle at 80% 10%, rgba(255, 247, 237, 0.65), transparent 45%),
+			radial-gradient(circle at 70% 80%, rgba(236, 254, 255, 0.7), transparent 55%);
+		pointer-events: none;
+		z-index: -1;
 	}
 
 	.page {
@@ -54,8 +82,9 @@
 		align-items: center;
 		justify-content: space-between;
 		padding: 16px 24px;
-		background: #101628;
-		color: #fff;
+		background: linear-gradient(120deg, #0f172a 0%, #1f2937 100%);
+		color: #f8fafc;
+		box-shadow: 0 10px 24px rgba(15, 23, 42, 0.2);
 	}
 
 	.brand {
@@ -63,6 +92,7 @@
 		font-size: 18px;
 		text-decoration: none;
 		color: inherit;
+		letter-spacing: 0.02em;
 	}
 
 	.nav {
@@ -73,7 +103,7 @@
 	}
 
 	.nav a {
-		color: #cfe1ff;
+		color: #fde68a;
 		text-decoration: none;
 		font-weight: 600;
 	}
@@ -83,23 +113,28 @@
 	}
 
 	.nav button {
-		border: 1px solid #cfe1ff;
+		border: 1px solid rgba(255, 255, 255, 0.4);
 		background: transparent;
-		color: #cfe1ff;
-		padding: 6px 10px;
-		border-radius: 6px;
+		color: #f8fafc;
+		padding: 6px 12px;
+		border-radius: 999px;
 		cursor: pointer;
-	}
-
-	.user {
-		color: #f7d38b;
 		font-weight: 600;
 	}
 
+	.user {
+		color: #fef3c7;
+		font-weight: 600;
+		background: rgba(248, 250, 252, 0.1);
+		padding: 4px 10px;
+		border-radius: 999px;
+	}
+
 	.content {
-		padding: 32px 24px;
-		max-width: 960px;
+		padding: 32px 24px 48px;
+		max-width: 1120px;
 		width: 100%;
 		margin: 0 auto;
 	}
 </style>
+

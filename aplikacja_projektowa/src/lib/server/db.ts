@@ -2,6 +2,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { pbkdf2Sync, randomBytes, timingSafeEqual } from 'node:crypto';
+import type { TagOption, ThreadSearch, ThreadSummary, UserSummary } from '$lib/types';
 
 type SessionRow = {
 	expiresAt: string;
@@ -24,6 +25,70 @@ export type AuthUser = {
 	username: string;
 	email: string;
 	role: string;
+};
+
+type TagRow = {
+	id: number;
+	name: string;
+};
+
+type ThreadSummaryRow = {
+	id: number;
+	title: string;
+	summary: string | null;
+	mainContent: string;
+	createdAt: string;
+	views: number;
+	author: string;
+	authorId: number;
+	cveId: string | null;
+	cvssScore: number | null;
+	affectedOs: string | null;
+	affectedProtocol: string | null;
+	exploitType: string | null;
+	escalationSteps: string | null;
+	mitigation: string | null;
+	patchUrl: string | null;
+	tags: string | null;
+};
+
+type LinkRow = {
+	threadId: number;
+	url: string;
+	description: string | null;
+};
+
+type UserSummaryRow = {
+	id: number;
+	username: string;
+	email: string;
+	role: string;
+};
+
+type ThreadLinkInput = {
+	url: string;
+	description?: string | null;
+};
+
+type NewThreadInput = {
+	title: string;
+	summary?: string | null;
+	mainContent: string;
+	authorId: number;
+	cveId?: string | null;
+	cvssScore?: number | null;
+	affectedOs?: string | null;
+	affectedProtocol?: string | null;
+	exploitType?: string | null;
+	escalationSteps?: string | null;
+	mitigation?: string | null;
+	patchUrl?: string | null;
+	tags?: string[];
+	links?: ThreadLinkInput[];
+};
+
+type UpdateThreadInput = NewThreadInput & {
+	threadId: number;
 };
 
 const DB_PATH = resolve('data', 'app.db');
@@ -339,4 +404,341 @@ export function getUserBySessionToken(token: string): AuthUser | null {
 		email: row.email,
 		role: row.role
 	};
+}
+
+export function getAllTags(): TagOption[] {
+	const database = getDb();
+	const rows = database
+		.prepare('SELECT id, tag_name AS name FROM Tags ORDER BY tag_name ASC')
+		.all() as TagRow[];
+
+	return rows.map((row) => ({
+		id: row.id,
+		name: row.name
+	}));
+}
+
+export function searchThreads(filters: ThreadSearch): ThreadSummary[] {
+	const database = getDb();
+	const clauses: string[] = [];
+	const params: Array<string | number> = [];
+
+	if (filters.query) {
+		const like = `%${filters.query}%`;
+		clauses.push(
+			`(Threads.title LIKE ?
+				OR Threads.summary LIKE ?
+				OR Threads.main_content LIKE ?
+				OR Exploit_Meta.cve_id LIKE ?
+				OR Exploit_Meta.exploit_type LIKE ?
+				OR Exploit_Meta.affected_os LIKE ?
+				OR Exploit_Meta.affected_protocol LIKE ?)`
+		);
+		params.push(like, like, like, like, like, like, like);
+	}
+
+	if (filters.exploitType) {
+		clauses.push('LOWER(Exploit_Meta.exploit_type) LIKE ?');
+		params.push(`%${filters.exploitType.toLowerCase()}%`);
+	}
+
+	if (filters.affectedOs) {
+		clauses.push('LOWER(Exploit_Meta.affected_os) LIKE ?');
+		params.push(`%${filters.affectedOs.toLowerCase()}%`);
+	}
+
+	if (filters.affectedProtocol) {
+		clauses.push('LOWER(Exploit_Meta.affected_protocol) LIKE ?');
+		params.push(`%${filters.affectedProtocol.toLowerCase()}%`);
+	}
+
+	if (filters.tags.length > 0) {
+		const placeholders = filters.tags.map(() => '?').join(', ');
+		clauses.push(
+			`Threads.id IN (
+				SELECT Thread_Tags.thread_id
+				FROM Thread_Tags
+				JOIN Tags ON Tags.id = Thread_Tags.tag_id
+				WHERE Tags.tag_name IN (${placeholders})
+			)`
+		);
+		params.push(...filters.tags);
+	}
+
+	const whereClause = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
+	const rows = database
+		.prepare(
+			`SELECT
+				Threads.id AS id,
+				Threads.title AS title,
+				Threads.summary AS summary,
+				Threads.main_content AS mainContent,
+				strftime('%Y-%m-%d', Threads.created_at) AS createdAt,
+				Threads.views AS views,
+				Users.username AS author,
+				Threads.author_id AS authorId,
+				Exploit_Meta.cve_id AS cveId,
+				Exploit_Meta.cvss_score AS cvssScore,
+				Exploit_Meta.affected_os AS affectedOs,
+				Exploit_Meta.affected_protocol AS affectedProtocol,
+				Exploit_Meta.exploit_type AS exploitType,
+				Exploit_Meta.escalation_steps AS escalationSteps,
+				Exploit_Meta.mitigation AS mitigation,
+				Exploit_Meta.patch_url AS patchUrl,
+				GROUP_CONCAT(DISTINCT Tags.tag_name) AS tags
+			FROM Threads
+			JOIN Users ON Users.id = Threads.author_id
+			LEFT JOIN Exploit_Meta ON Exploit_Meta.thread_id = Threads.id
+			LEFT JOIN Thread_Tags ON Thread_Tags.thread_id = Threads.id
+			LEFT JOIN Tags ON Tags.id = Thread_Tags.tag_id
+			${whereClause}
+			GROUP BY Threads.id
+			ORDER BY Threads.created_at DESC
+			LIMIT 200`
+		)
+		.all(...params) as ThreadSummaryRow[];
+
+	return rows.map((row) => {
+		const summary = row.summary?.trim() ?? '';
+		const fallback = row.mainContent.trim();
+		const excerptSource = summary || fallback;
+		const excerpt = excerptSource.length > 220 ? `${excerptSource.slice(0, 217)}...` : excerptSource;
+		const tags = row.tags ? row.tags.split(',').map((tag) => tag.trim()) : [];
+
+		return {
+			id: row.id,
+			title: row.title,
+			summary: row.summary,
+			mainContent: row.mainContent,
+			excerpt,
+			author: row.author,
+			authorId: row.authorId,
+			createdAt: row.createdAt,
+			views: row.views,
+			cveId: row.cveId,
+			cvssScore: row.cvssScore,
+			affectedOs: row.affectedOs,
+			affectedProtocol: row.affectedProtocol,
+			exploitType: row.exploitType,
+			escalationSteps: row.escalationSteps,
+			mitigation: row.mitigation,
+			patchUrl: row.patchUrl,
+			tags
+		};
+	});
+}
+
+export function getThreadAuthorId(threadId: number): number | null {
+	const database = getDb();
+	const row = database
+		.prepare('SELECT author_id AS authorId FROM Threads WHERE id = ?')
+		.get(threadId) as { authorId: number } | undefined;
+
+	return row?.authorId ?? null;
+}
+
+export function getLinksByThreadIds(threadIds: number[]): LinkRow[] {
+	if (threadIds.length === 0) {
+		return [];
+	}
+
+	const database = getDb();
+	const placeholders = threadIds.map(() => '?').join(', ');
+	return database
+		.prepare(
+			`SELECT thread_id AS threadId, url, description
+			FROM Links
+			WHERE thread_id IN (${placeholders})
+			ORDER BY id ASC`
+		)
+		.all(...threadIds) as LinkRow[];
+}
+
+export function createThread(input: NewThreadInput): number {
+	const database = getDb();
+	const tags = input.tags?.map((tag) => tag.trim()).filter(Boolean) ?? [];
+	const links = input.links?.filter((link) => link.url.trim()) ?? [];
+
+	const insertThread = database.prepare(
+		'INSERT INTO Threads (title, summary, main_content, author_id) VALUES (?, ?, ?, ?)'
+	);
+	const insertMeta = database.prepare(
+		`INSERT INTO Exploit_Meta (
+			thread_id,
+			cve_id,
+			cvss_score,
+			affected_os,
+			affected_protocol,
+			exploit_type,
+			escalation_steps,
+			mitigation,
+			patch_url
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	);
+	const insertLink = database.prepare(
+		'INSERT INTO Links (thread_id, url, description) VALUES (?, ?, ?)'
+	);
+	const insertTag = database.prepare('INSERT INTO Tags (tag_name) VALUES (?)');
+	const getTagId = database.prepare('SELECT id FROM Tags WHERE tag_name = ?');
+	const insertThreadTag = database.prepare(
+		'INSERT OR IGNORE INTO Thread_Tags (thread_id, tag_id) VALUES (?, ?)'
+	);
+
+	database.exec('BEGIN');
+	try {
+		const threadResult = insertThread.run(
+			input.title,
+			input.summary ?? null,
+			input.mainContent,
+			input.authorId
+		);
+		const threadId = Number(threadResult.lastInsertRowid);
+
+		insertMeta.run(
+			threadId,
+			input.cveId ?? null,
+			input.cvssScore ?? null,
+			input.affectedOs ?? null,
+			input.affectedProtocol ?? null,
+			input.exploitType ?? null,
+			input.escalationSteps ?? null,
+			input.mitigation ?? null,
+			input.patchUrl ?? null
+		);
+
+		for (const link of links) {
+			insertLink.run(threadId, link.url.trim(), link.description?.trim() || null);
+		}
+
+		for (const tag of tags) {
+			let tagRow = getTagId.get(tag) as { id: number } | undefined;
+			if (!tagRow) {
+				insertTag.run(tag);
+				tagRow = getTagId.get(tag) as { id: number } | undefined;
+			}
+			if (tagRow) {
+				insertThreadTag.run(threadId, tagRow.id);
+			}
+		}
+
+		database.exec('COMMIT');
+		return threadId;
+	} catch (error) {
+		database.exec('ROLLBACK');
+		throw error;
+	}
+}
+
+export function updateThread(input: UpdateThreadInput): void {
+	const database = getDb();
+	const tags = input.tags?.map((tag) => tag.trim()).filter(Boolean) ?? [];
+	const links = input.links?.filter((link) => link.url.trim()) ?? [];
+
+	const updateThreadStmt = database.prepare(
+		'UPDATE Threads SET title = ?, summary = ?, main_content = ? WHERE id = ?'
+	);
+	const upsertMeta = database.prepare(
+		`INSERT INTO Exploit_Meta (
+			thread_id,
+			cve_id,
+			cvss_score,
+			affected_os,
+			affected_protocol,
+			exploit_type,
+			escalation_steps,
+			mitigation,
+			patch_url
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(thread_id) DO UPDATE SET
+			cve_id = excluded.cve_id,
+			cvss_score = excluded.cvss_score,
+			affected_os = excluded.affected_os,
+			affected_protocol = excluded.affected_protocol,
+			exploit_type = excluded.exploit_type,
+			escalation_steps = excluded.escalation_steps,
+			mitigation = excluded.mitigation,
+			patch_url = excluded.patch_url`
+	);
+	const deleteLinks = database.prepare('DELETE FROM Links WHERE thread_id = ?');
+	const insertLink = database.prepare(
+		'INSERT INTO Links (thread_id, url, description) VALUES (?, ?, ?)'
+	);
+	const deleteThreadTags = database.prepare('DELETE FROM Thread_Tags WHERE thread_id = ?');
+	const insertTag = database.prepare('INSERT INTO Tags (tag_name) VALUES (?)');
+	const getTagId = database.prepare('SELECT id FROM Tags WHERE tag_name = ?');
+	const insertThreadTag = database.prepare(
+		'INSERT OR IGNORE INTO Thread_Tags (thread_id, tag_id) VALUES (?, ?)'
+	);
+
+	database.exec('BEGIN');
+	try {
+		updateThreadStmt.run(
+			input.title,
+			input.summary ?? null,
+			input.mainContent,
+			input.threadId
+		);
+
+		upsertMeta.run(
+			input.threadId,
+			input.cveId ?? null,
+			input.cvssScore ?? null,
+			input.affectedOs ?? null,
+			input.affectedProtocol ?? null,
+			input.exploitType ?? null,
+			input.escalationSteps ?? null,
+			input.mitigation ?? null,
+			input.patchUrl ?? null
+		);
+
+		deleteLinks.run(input.threadId);
+		for (const link of links) {
+			insertLink.run(input.threadId, link.url.trim(), link.description?.trim() || null);
+		}
+
+		deleteThreadTags.run(input.threadId);
+		for (const tag of tags) {
+			let tagRow = getTagId.get(tag) as { id: number } | undefined;
+			if (!tagRow) {
+				insertTag.run(tag);
+				tagRow = getTagId.get(tag) as { id: number } | undefined;
+			}
+			if (tagRow) {
+				insertThreadTag.run(input.threadId, tagRow.id);
+			}
+		}
+
+		database.exec('COMMIT');
+	} catch (error) {
+		database.exec('ROLLBACK');
+		throw error;
+	}
+}
+
+export function listUsers(): UserSummary[] {
+	const database = getDb();
+	const rows = database
+		.prepare(
+			`SELECT Users.id AS id,
+				Users.username AS username,
+				Users.email AS email,
+				Roles.name AS role
+			FROM Users
+			JOIN Roles ON Roles.id = Users.role_id
+			ORDER BY Users.username ASC`
+		)
+		.all() as UserSummaryRow[];
+
+	return rows.map((row) => ({
+		id: row.id,
+		username: row.username,
+		email: row.email,
+		role: row.role
+	}));
+}
+
+export function updateUserRole(userId: number, roleName: string): void {
+	const database = getDb();
+	const roleId = getRoleIdByName(roleName, database);
+	database.prepare('UPDATE Users SET role_id = ? WHERE id = ?').run(roleId, userId);
 }
