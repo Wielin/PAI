@@ -16,6 +16,12 @@
 		<a class="brand" href="/">Exploit DB</a>
 		<nav class="nav">
 			<a href="/">Start</a>
+			{#if role === 'Contributor' || role === 'Admin'}
+				<a href="/contribute">Panel wpisow</a>
+			{/if}
+			{#if role === 'Admin'}
+				<a href="/admin">Admin</a>
+			{/if}
 			{#if user}
 				<span class="user">Zalogowany: {user.username} ({role})</span>
 				<form method="POST" action="/logout">

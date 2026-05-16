@@ -52,6 +52,22 @@ type ThreadSummaryRow = {
 	tags: string | null;
 };
 
+type ThreadSearchOptions = {
+	page: number;
+	pageSize: number;
+	includeCount?: boolean;
+};
+
+type ThreadSearchResult = {
+	threads: ThreadSummary[];
+	totalCount: number;
+};
+
+type ThreadSearchQuery = {
+	whereClause: string;
+	params: Array<string | number>;
+};
+
 type LinkRow = {
 	threadId: number;
 	url: string;
@@ -418,8 +434,7 @@ export function getAllTags(): TagOption[] {
 	}));
 }
 
-export function searchThreads(filters: ThreadSearch): ThreadSummary[] {
-	const database = getDb();
+function buildThreadSearchQuery(filters: ThreadSearch): ThreadSearchQuery {
 	const clauses: string[] = [];
 	const params: Array<string | number> = [];
 
@@ -465,7 +480,38 @@ export function searchThreads(filters: ThreadSearch): ThreadSummary[] {
 		params.push(...filters.tags);
 	}
 
-	const whereClause = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
+	return {
+		whereClause: clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '',
+		params
+	};
+}
+
+export function searchThreadsPaged(
+	filters: ThreadSearch,
+	options: ThreadSearchOptions
+): ThreadSearchResult {
+	const database = getDb();
+	const { whereClause, params } = buildThreadSearchQuery(filters);
+	const page = Math.max(1, Math.floor(options.page));
+	const pageSize = Math.max(1, Math.floor(options.pageSize));
+	const offset = (page - 1) * pageSize;
+
+	let totalCount = 0;
+	if (options.includeCount) {
+		const countRow = database
+			.prepare(
+				`SELECT COUNT(DISTINCT Threads.id) AS count
+				FROM Threads
+				JOIN Users ON Users.id = Threads.author_id
+				LEFT JOIN Exploit_Meta ON Exploit_Meta.thread_id = Threads.id
+				LEFT JOIN Thread_Tags ON Thread_Tags.thread_id = Threads.id
+				LEFT JOIN Tags ON Tags.id = Thread_Tags.tag_id
+				${whereClause}`
+			)
+			.get(...params) as { count: number } | undefined;
+		totalCount = countRow?.count ?? 0;
+	}
+
 	const rows = database
 		.prepare(
 			`SELECT
@@ -494,11 +540,11 @@ export function searchThreads(filters: ThreadSearch): ThreadSummary[] {
 			${whereClause}
 			GROUP BY Threads.id
 			ORDER BY Threads.created_at DESC
-			LIMIT 200`
+			LIMIT ? OFFSET ?`
 		)
-		.all(...params) as ThreadSummaryRow[];
+		.all(...params, pageSize, offset) as ThreadSummaryRow[];
 
-	return rows.map((row) => {
+	const threads = rows.map((row) => {
 		const summary = row.summary?.trim() ?? '';
 		const fallback = row.mainContent.trim();
 		const excerptSource = summary || fallback;
@@ -526,6 +572,15 @@ export function searchThreads(filters: ThreadSearch): ThreadSummary[] {
 			tags
 		};
 	});
+
+	return {
+		threads,
+		totalCount
+	};
+}
+
+export function searchThreads(filters: ThreadSearch): ThreadSummary[] {
+	return searchThreadsPaged(filters, { page: 1, pageSize: 200, includeCount: false }).threads;
 }
 
 export function getThreadAuthorId(threadId: number): number | null {

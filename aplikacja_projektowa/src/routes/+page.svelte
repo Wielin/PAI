@@ -1,10 +1,135 @@
 <script lang="ts">
-	let { data, form } = $props();
+	let { data } = $props();
 	const user = $derived(data.user);
 	const role = $derived(user?.role ?? 'Guest');
 	const search = $derived(data.search);
-	const canEditThread = (thread: { authorId: number }) =>
-		role === 'Admin' || (role === 'Contributor' && user?.id === thread.authorId);
+	const page = $derived(data.page);
+	const pageSize = $derived(data.pageSize);
+	const totalCount = $derived(data.totalCount);
+	const totalPages = $derived(data.totalPages);
+
+	type LiveSearchResult = {
+		id: number;
+		title: string;
+		excerpt: string;
+		cveId: string | null;
+		createdAt: string;
+		author: string;
+	};
+
+	type LiveSearchResponse = {
+		results: LiveSearchResult[];
+		totalCount: number;
+	};
+
+	const pageSizeOptions = [8, 16, 32];
+	const pageSizeList = $derived(() => {
+		const values = new Set(pageSizeOptions);
+		values.add(pageSize);
+		return Array.from(values).sort((a, b) => a - b);
+	});
+	const LIVE_MIN = 2;
+	const LIVE_LIMIT = 6;
+	const LIVE_DELAY = 250;
+
+	let liveQuery = $state(search.query);
+	let liveResults: LiveSearchResult[] = $state([]);
+	let liveStatus: 'idle' | 'loading' | 'error' = $state('idle');
+	let liveOpen = $state(false);
+	let liveTotal = $state(0);
+	let liveAbort: AbortController | null = null;
+	let liveTimer: ReturnType<typeof setTimeout> | null = null;
+
+	const buildPageUrl = (targetPage: number): string => {
+		const params = new URLSearchParams();
+		if (search.query) {
+			params.set('q', search.query);
+		}
+		if (search.exploitType) {
+			params.set('exploitType', search.exploitType);
+		}
+		if (search.affectedOs) {
+			params.set('affectedOs', search.affectedOs);
+		}
+		if (search.affectedProtocol) {
+			params.set('affectedProtocol', search.affectedProtocol);
+		}
+		for (const tag of search.tags) {
+			params.append('tag', tag);
+		}
+		params.set('page', String(targetPage));
+		params.set('pageSize', String(pageSize));
+		return `/?${params.toString()}`;
+	};
+
+	const buildLiveSearchUrl = (term: string): string => {
+		const params = new URLSearchParams();
+		params.set('q', term);
+		params.set('page', '1');
+		params.set('pageSize', String(pageSize));
+		return `/?${params.toString()}`;
+	};
+
+	const runLiveSearch = async (term: string): Promise<void> => {
+		if (liveAbort) {
+			liveAbort.abort();
+		}
+
+		liveAbort = new AbortController();
+		liveStatus = 'loading';
+		liveOpen = true;
+
+		try {
+			const params = new URLSearchParams({ q: term, limit: String(LIVE_LIMIT) });
+			const response = await fetch(`/api/threads/search?${params.toString()}`, {
+				signal: liveAbort.signal
+			});
+
+			if (!response.ok) {
+				throw new Error('Live search failed');
+			}
+
+			const payload = (await response.json()) as LiveSearchResponse;
+			liveResults = payload.results;
+			liveTotal = payload.totalCount;
+			liveStatus = 'idle';
+		} catch (error) {
+			if (error instanceof DOMException && error.name === 'AbortError') {
+				return;
+			}
+			liveStatus = 'error';
+		}
+	};
+
+	const handleLiveInput = (): void => {
+		if (liveTimer) {
+			clearTimeout(liveTimer);
+		}
+
+		const term = liveQuery.trim();
+		if (term.length < LIVE_MIN) {
+			liveResults = [];
+			liveTotal = 0;
+			liveStatus = 'idle';
+			liveOpen = false;
+			return;
+		}
+
+		liveTimer = setTimeout(() => {
+			void runLiveSearch(term);
+		}, LIVE_DELAY);
+	};
+
+	$effect(() => {
+		liveQuery = search.query;
+		liveResults = [];
+		liveTotal = 0;
+		liveStatus = 'idle';
+		liveOpen = false;
+	});
+
+	const startIndex = $derived(totalCount === 0 ? 0 : (page - 1) * pageSize + 1);
+	const endIndex = $derived(totalCount === 0 ? 0 : Math.min(totalCount, page * pageSize));
 </script>
 
 <svelte:head>
@@ -31,15 +156,51 @@
 	</div>
 
 	<form method="GET" class="search-card">
-		<div class="field">
+		<input type="hidden" name="page" value="1" />
+		<div class="field live-field">
 			<label for="q">Fraza</label>
 			<input
 				id="q"
 				name="q"
 				type="search"
 				placeholder="CVE-2024-XXXX, nazwa, technika"
-				value={search.query}
+				bind:value={liveQuery}
+				on:input={handleLiveInput}
 			/>
+			{#if liveOpen}
+				<div class="live-panel" aria-live="polite">
+					{#if liveStatus === 'loading'}
+						<p class="live-status">Szukam...</p>
+					{:else if liveStatus === 'error'}
+						<p class="live-status error">Nie udalo sie pobrac wynikow.</p>
+					{:else if liveResults.length === 0}
+						<p class="live-status">Brak wynikow.</p>
+					{:else}
+						<ul class="live-list">
+							{#each liveResults as result}
+								<li class="live-item">
+									<div class="live-title-row">
+										<span class="live-title">{result.title}</span>
+										{#if result.cveId}
+											<span class="badge">{result.cveId}</span>
+										{/if}
+									</div>
+									<p class="live-excerpt">{result.excerpt}</p>
+									<span class="live-meta">
+										Autor {result.author} · {result.createdAt}
+									</span>
+								</li>
+							{/each}
+						</ul>
+						<div class="live-footer">
+							<span>{liveTotal} wynikow</span>
+							<a class="live-more" href={buildLiveSearchUrl(liveQuery.trim())}>
+								Pokaz wszystkie
+							</a>
+						</div>
+					{/if}
+				</div>
+			{/if}
 		</div>
 		<div class="grid-3">
 			<label>
@@ -75,6 +236,18 @@
 				{/each}
 			</div>
 		</fieldset>
+		<div class="grid-2">
+			<label>
+				Wyniki na strone
+				<select name="pageSize">
+					{#each pageSizeList as size}
+						<option value={size} selected={size === pageSize}>
+							{size}
+						</option>
+					{/each}
+				</select>
+			</label>
+		</div>
 		<div class="search-actions">
 			<button type="submit" class="primary">Szukaj</button>
 			<a class="ghost" href="/">Wyczysc</a>
@@ -85,9 +258,15 @@
 <section class="results">
 	<div class="section-head">
 		<h2>Wyniki</h2>
-		<span class="count">{data.threads.length} wpisow</span>
+		<span class="count">
+			{#if totalCount === 0}
+				0 wpisow
+			{:else}
+				Pokazuje {startIndex}-{endIndex} z {totalCount}
+			{/if}
+		</span>
 	</div>
-	{#if data.threads.length === 0}
+	{#if totalCount === 0}
 		<p class="empty">Brak wpisow dla podanych filtrow.</p>
 	{:else}
 		<div class="thread-grid">
@@ -132,235 +311,28 @@
 							</strong>
 						</div>
 					</div>
-						{#if canEditThread(thread)}
-							<details class="edit-box">
-								<summary>Edytuj wpis</summary>
-								{#if form?.formId === 'editThread' && form.threadId === thread.id && form.error}
-									<p class="form-error">{form.error}</p>
-								{/if}
-								{#if form?.formId === 'editThread' && form.threadId === thread.id && form.success}
-									<p class="form-success">Wpis zaktualizowany.</p>
-								{/if}
-								<form method="POST" action="?/editThread" class="edit-form">
-									<input type="hidden" name="threadId" value={thread.id} />
-									<div class="grid-2">
-										<label>
-											Tytul
-											<input name="title" value={thread.title} required />
-										</label>
-										<label>
-											CVE ID
-											<input name="cveId" value={thread.cveId ?? ''} />
-										</label>
-									</div>
-									<label>
-										Summary
-										<textarea name="summary" rows="2">{thread.summary ?? ''}</textarea>
-									</label>
-									<label>
-										Tresc wpisu
-										<textarea name="mainContent" rows="6">{thread.mainContent}</textarea>
-									</label>
-									<div class="grid-3">
-										<label>
-											CVSS
-											<input
-												name="cvssScore"
-												type="number"
-												min="0"
-												max="10"
-												step="0.1"
-												value={thread.cvssScore ?? ''}
-											/>
-										</label>
-										<label>
-											Typ exploita
-											<input name="exploitType" value={thread.exploitType ?? ''} />
-										</label>
-										<label>
-											OS
-											<input name="affectedOs" value={thread.affectedOs ?? ''} />
-										</label>
-										<label>
-											Protokol
-											<input
-												name="affectedProtocol"
-												value={thread.affectedProtocol ?? ''}
-											/>
-										</label>
-									</div>
-									<label>
-										Escalation steps
-										<textarea name="escalationSteps" rows="3">{thread.escalationSteps ?? ''}</textarea>
-									</label>
-									<label>
-										Mitigation
-										<textarea name="mitigation" rows="3">{thread.mitigation ?? ''}</textarea>
-									</label>
-									<label>
-										Patch URL
-										<input name="patchUrl" type="url" value={thread.patchUrl ?? ''} />
-									</label>
-									<fieldset class="tag-fieldset">
-										<legend>Tagi</legend>
-										<div class="tag-list">
-											{#each data.tags as tag}
-												<label class="tag-check">
-													<input
-														type="checkbox"
-														name="tags"
-														value={tag.name}
-														checked={thread.tags.includes(tag.name)}
-													/>
-													<span>{tag.name}</span>
-												</label>
-											{/each}
-										</div>
-									</fieldset>
-									<label>
-										Linki (po jednym w linii, format: url | opis)
-										<textarea name="links" rows="3">{thread.linksText ?? ''}</textarea>
-									</label>
-									<button type="submit" class="primary">Zapisz zmiany</button>
-								</form>
-							</details>
-						{/if}
 				</article>
 			{/each}
 		</div>
+		{#if totalPages > 1}
+			<nav class="pagination" aria-label="Paginacja">
+				<span class="pager-info">Strona {page} z {totalPages}</span>
+				<div class="pager-actions">
+					{#if page > 1}
+						<a class="pager-btn" href={buildPageUrl(page - 1)}>Poprzednia</a>
+					{:else}
+						<span class="pager-btn disabled">Poprzednia</span>
+					{/if}
+					{#if page < totalPages}
+						<a class="pager-btn" href={buildPageUrl(page + 1)}>Nastepna</a>
+					{:else}
+						<span class="pager-btn disabled">Nastepna</span>
+					{/if}
+				</div>
+			</nav>
+		{/if}
 	{/if}
 </section>
-
-{#if role === 'Contributor' || role === 'Admin'}
-	<section class="contribute">
-		<div class="section-head">
-			<h2>Nowy wpis</h2>
-			<p class="muted">Widoczne tylko dla Contributor i Admin.</p>
-		</div>
-		{#if form?.formId === 'createThread' && form.error}
-			<p class="form-error">{form.error}</p>
-		{/if}
-		{#if form?.formId === 'createThread' && form.success}
-			<p class="form-success">Wpis dodany pomyslnie.</p>
-		{/if}
-		<form method="POST" action="?/createThread" class="create-form">
-			<div class="grid-2">
-				<label>
-					Tytul
-					<input name="title" required />
-				</label>
-				<label>
-					CVE ID
-					<input name="cveId" placeholder="CVE-2024-1234" />
-				</label>
-			</div>
-			<label>
-				Summary
-				<textarea name="summary" rows="2" placeholder="Krotki opis"></textarea>
-			</label>
-			<label>
-				Tresc wpisu
-				<textarea name="mainContent" rows="6" required></textarea>
-			</label>
-			<div class="grid-3">
-				<label>
-					CVSS
-					<input name="cvssScore" type="number" min="0" max="10" step="0.1" />
-				</label>
-				<label>
-					Typ exploita
-					<input name="exploitType" placeholder="RCE" />
-				</label>
-				<label>
-					OS
-					<input name="affectedOs" placeholder="Windows" />
-				</label>
-				<label>
-					Protokol
-					<input name="affectedProtocol" placeholder="HTTP" />
-				</label>
-			</div>
-			<label>
-				Escalation steps
-				<textarea name="escalationSteps" rows="3"></textarea>
-			</label>
-			<label>
-				Mitigation
-				<textarea name="mitigation" rows="3"></textarea>
-			</label>
-			<label>
-				Patch URL
-				<input name="patchUrl" type="url" placeholder="https://" />
-			</label>
-			<fieldset class="tag-fieldset">
-				<legend>Tagi</legend>
-				<div class="tag-list">
-					{#each data.tags as tag}
-						<label class="tag-check">
-							<input type="checkbox" name="tags" value={tag.name} />
-							<span>{tag.name}</span>
-						</label>
-					{/each}
-				</div>
-			</fieldset>
-			<label>
-				Linki (po jednym w linii, format: url | opis)
-				<textarea name="links" rows="3"></textarea>
-			</label>
-			<button type="submit" class="primary">Dodaj wpis</button>
-		</form>
-	</section>
-{:else if role === 'User'}
-	<section class="contribute locked">
-		<h2>Dodawanie wpisow</h2>
-		<p class="muted">
-			Ta sekcja jest dostepna tylko dla Contributor. Popros Admina o nadanie roli.
-		</p>
-	</section>
-{/if}
-
-{#if role === 'Admin'}
-	<section class="admin">
-		<div class="section-head">
-			<h2>Uprawnienia kont</h2>
-			<p class="muted">Nadaj role Contributor dla kont User.</p>
-		</div>
-		{#if form?.formId === 'updateRole' && form.error}
-			<p class="form-error">{form.error}</p>
-		{/if}
-		{#if form?.formId === 'updateRole' && form.success}
-			<p class="form-success">Rola zaktualizowana.</p>
-		{/if}
-		{#if data.users.length === 0}
-			<p class="empty">Brak kont do zmiany.</p>
-		{:else}
-			<div class="user-list">
-				{#each data.users as account}
-					<div class="user-card">
-						<div>
-							<p class="name">{account.username}</p>
-							<p class="muted">{account.email}</p>
-							<span class="role">{account.role}</span>
-						</div>
-						{#if account.role === 'Contributor'}
-							<form method="POST" action="?/updateRole">
-								<input type="hidden" name="userId" value={account.id} />
-								<input type="hidden" name="role" value="User" />
-								<button type="submit" class="ghost">Odbierz Contributor</button>
-							</form>
-						{:else}
-							<form method="POST" action="?/updateRole">
-								<input type="hidden" name="userId" value={account.id} />
-								<input type="hidden" name="role" value="Contributor" />
-								<button type="submit" class="ghost">Nadaj Contributor</button>
-							</form>
-						{/if}
-					</div>
-				{/each}
-			</div>
-		{/if}
-	</section>
-{/if}
 
 <style>
 	.hero {
@@ -446,6 +418,7 @@
 	}
 
 	.search-card input,
+	.search-card select,
 	.search-card textarea,
 	.create-form input,
 	.create-form textarea {
@@ -458,11 +431,97 @@
 	}
 
 	.search-card input:focus,
+	.search-card select:focus,
 	.create-form input:focus,
 	.create-form textarea:focus,
 	.search-card textarea:focus {
 		outline: 2px solid rgba(249, 115, 22, 0.3);
 		border-color: rgba(249, 115, 22, 0.55);
+	}
+
+	.live-field {
+		position: relative;
+	}
+
+	.live-panel {
+		position: absolute;
+		left: 0;
+		right: 0;
+		top: calc(100% + 6px);
+		background: #fff;
+		border: 1px solid var(--line);
+		border-radius: 14px;
+		padding: 12px;
+		box-shadow: 0 12px 24px rgba(15, 23, 42, 0.12);
+		z-index: 5;
+		display: grid;
+		gap: 10px;
+	}
+
+	.live-status {
+		margin: 0;
+		font-size: 14px;
+		color: var(--ink-600);
+	}
+
+	.live-status.error {
+		color: #b91c1c;
+		font-weight: 600;
+	}
+
+	.live-list {
+		list-style: none;
+		margin: 0;
+		padding: 0;
+		display: grid;
+		gap: 8px;
+	}
+
+	.live-item {
+		padding: 10px 12px;
+		border-radius: 12px;
+		border: 1px solid rgba(15, 23, 42, 0.08);
+		background: var(--surface-alt);
+		display: grid;
+		gap: 6px;
+	}
+
+	.live-title-row {
+		display: flex;
+		gap: 8px;
+		align-items: center;
+		justify-content: space-between;
+	}
+
+	.live-title {
+		font-weight: 700;
+		color: var(--ink-900);
+		font-size: 14px;
+	}
+
+	.live-excerpt {
+		margin: 0;
+		font-size: 13px;
+		color: var(--ink-700);
+	}
+
+	.live-meta {
+		font-size: 12px;
+		color: var(--ink-500);
+	}
+
+	.live-footer {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		font-size: 12px;
+		color: var(--ink-500);
+	}
+
+	.live-more {
+		font-weight: 700;
+		color: var(--brand-700);
+		text-decoration: none;
 	}
 
 	.grid-3 {
@@ -539,6 +598,44 @@
 		flex-direction: column;
 		gap: 20px;
 		margin-bottom: 32px;
+	}
+
+	.pagination {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		gap: 12px;
+		padding: 10px 16px;
+		border-radius: 14px;
+		border: 1px solid var(--line);
+		background: var(--surface);
+		box-shadow: var(--shadow);
+	}
+
+	.pager-info {
+		font-weight: 600;
+		color: var(--ink-700);
+	}
+
+	.pager-actions {
+		display: flex;
+		gap: 10px;
+		align-items: center;
+	}
+
+	.pager-btn {
+		padding: 8px 14px;
+		border-radius: 999px;
+		border: 1px solid rgba(15, 23, 42, 0.2);
+		background: #fff;
+		font-weight: 700;
+		color: var(--ink-900);
+		text-decoration: none;
+	}
+
+	.pager-btn.disabled {
+		opacity: 0.5;
+		pointer-events: none;
 	}
 
 	.section-head {
@@ -659,86 +756,6 @@
 		color: #0f766e;
 	}
 
-	.contribute,
-	.admin {
-		background: rgba(255, 255, 255, 0.85);
-		border: 1px solid var(--line);
-		border-radius: 20px;
-		padding: 22px;
-		box-shadow: var(--shadow);
-		margin-bottom: 32px;
-		animation: fadeUp 0.6s ease both;
-	}
-
-	.contribute.locked {
-		text-align: center;
-	}
-
-	.create-form,
-	.edit-form {
-		display: flex;
-		flex-direction: column;
-		gap: 16px;
-		margin-top: 16px;
-	}
-
-	.edit-box {
-		margin-top: 12px;
-		padding-top: 12px;
-		border-top: 1px dashed var(--line);
-	}
-
-	.edit-box summary {
-		cursor: pointer;
-		font-weight: 700;
-		color: var(--brand-700);
-	}
-
-	.edit-box[open] summary {
-		margin-bottom: 12px;
-	}
-
-	.user-list {
-		display: grid;
-		gap: 12px;
-		margin-top: 16px;
-	}
-
-	.user-card {
-		display: flex;
-		justify-content: space-between;
-		align-items: center;
-		gap: 12px;
-		padding: 14px 16px;
-		border-radius: 16px;
-		border: 1px solid var(--line);
-		background: var(--surface);
-	}
-
-	.user-card .name {
-		margin: 0;
-		font-weight: 700;
-	}
-
-	.user-card .role {
-		display: inline-block;
-		margin-top: 4px;
-		font-size: 12px;
-		color: var(--ink-500);
-	}
-
-	.form-error {
-		color: #b91c1c;
-		font-weight: 600;
-		margin: 8px 0;
-	}
-
-	.form-success {
-		color: #0f766e;
-		font-weight: 600;
-		margin: 8px 0;
-	}
-
 	.muted {
 		color: var(--ink-500);
 		margin: 0;
@@ -786,7 +803,7 @@
 			flex-direction: column;
 			align-items: flex-start;
 		}
-		.user-card {
+		.pagination {
 			flex-direction: column;
 			align-items: flex-start;
 		}
